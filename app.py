@@ -1,68 +1,74 @@
+import httpx
+import warnings
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
-from urllib.parse import unquote
-import re
+from urllib.parse import urlparse, parse_qs, unquote
+
+warnings.filterwarnings("ignore")
 
 app = FastAPI(docs_url=None, redoc_url=None)
 
-@app.get("/Eat")
-async def decode_eat_token(eat_token: str = Query(..., description="Eat Token")):
-    """Parse Eat Token - Works with your token format"""
-    
+async def exchange_eat_to_access(eat_token: str):
+    """Convert Eat Token to Access Token"""
     try:
-        # Your token already has all data
-        result = {
-            "status": "success",
-            "credit": "@CodingWithNexu",
-            "data": {
-                "account_id": None,
-                "nickname": None,
-                "region": "IND",
-                "eat_token": None
-            }
-        }
-        
-        # Parse the query string
-        if '&' in eat_token:
-            params = eat_token.split('&')
-            for param in params:
-                if '=' in param:
-                    key, value = param.split('=', 1)
-                    key = key.strip().lower()
-                    value = unquote(value.strip())
-                    
-                    if key == 'account_id':
-                        result["data"]["account_id"] = value
-                    elif key == 'nickname':
-                        # Handle special chars
-                        result["data"]["nickname"] = value
-                    elif key == 'region':
-                        result["data"]["region"] = value
-                    elif key == 'eat':
-                        result["data"]["eat_token"] = value[:50] + "..."  # Truncate
-        else:
-            result["data"]["eat_token"] = eat_token[:50] + "..."
-            result["message"] = "Token only - no account info in params"
-        
-        # Validate we got data
-        if not result["data"]["account_id"]:
-            result["warning"] = "Account ID not found in token"
-        
-        return JSONResponse(content=result)
-        
+        async with httpx.AsyncClient(verify=False, timeout=15.0) as client:
+            callback_url = f"https://api-otrss.garena.com/support/callback/?access_token={eat_token}"
+            response = await client.get(callback_url, follow_redirects=False)
+
+            if 300 <= response.status_code < 400 and "Location" in response.headers:
+                redirect_url = response.headers["Location"]
+                parsed_url = urlparse(redirect_url)
+                query_params = parse_qs(parsed_url.query)
+
+                access_token = query_params.get("access_token", [None])[0]
+                account_id = query_params.get("account_id", [None])[0]
+                nickname = query_params.get("nickname", [None])[0]
+                region = query_params.get("region", [None])[0]
+
+                if access_token and account_id:
+                    return {
+                        "success": True,
+                        "access_token": access_token,
+                        "account_id": account_id,
+                        "nickname": unquote(nickname) if nickname else None,
+                        "region": region
+                    }
+            
+            return {"success": False, "error": "Invalid eat token"}
+            
     except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.get("/Eat")
+async def eat_to_access(eat_token: str = Query(..., description="Eat Token from Garena")):
+    """Convert Eat Token to Access Token"""
+    
+    result = await exchange_eat_to_access(eat_token)
+    
+    if result.get("success"):
+        return JSONResponse(content={
+            "status": "success",
+            "access_token": result["access_token"],
+            "account_id": result["account_id"],
+            "nickname": result["nickname"],
+            "region": result.get("region", "IND"),
+            "credit": "@CodingWithNexu"
+        })
+    else:
         return JSONResponse(
             status_code=400,
-            content={"status": "error", "message": str(e)}
+            content={
+                "status": "error",
+                "message": result.get("error", "Failed to exchange token")
+            }
         )
 
 @app.get("/")
 async def root():
     return {
-        "service": "Eat Token Decoder",
-        "endpoint": "/Eat?eat_token=YOUR_TOKEN",
-        "example": "/Eat?eat_token=eat=xxx&account_id=14345056892&nickname=ZAITU&region=IND",
-        "deployed_on": "Vercel"
+        "service": "Eat to Access Token Converter",
+        "endpoint": "GET /Eat?eat_token=YOUR_EAT_TOKEN",
+        "status": "working"
     }
 
 if __name__ == "__main__":
